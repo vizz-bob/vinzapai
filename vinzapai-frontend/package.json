@@ -3,12 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
     "react-router-dom": "^6.28.0",
     "recharts": "^2.13.0",
     "lucide-react": "^0.468.0",
-    "axios": "^1.7.0"
+    "axios": "^1.7.0",
+    "ajv": "^8.11.0"
   },
   "devDependencies": {
     "react-scripts": "5.0.1",
@@ -25,6 +26,9 @@
     "extends": [
       "react-app"
     ]
+  },
+  "overrides": {
+    "ajv": "^8.11.0"
   },
   "browserslist": {
     "production": [
