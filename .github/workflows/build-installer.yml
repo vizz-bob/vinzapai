@@ -73,7 +73,17 @@ jobs:
       # 8. Build .exe with PyInstaller
       - name: Build with PyInstaller
         working-directory: vinzapai-backend
-        run: pyinstaller vinzapai_backend.spec --clean --noconfirm
+        shell: pwsh
+        run: |
+          Write-Host "Working dir: $(Get-Location)"
+          Write-Host "Spec files found:"
+          Get-ChildItem -Filter "*.spec" | Select-Object Name
+          if (-not (Test-Path "vinzapai_backend.spec")) {
+            Write-Error "vinzapai_backend.spec not found in $(Get-Location)"
+            Get-ChildItem | Select-Object Name
+            exit 1
+          }
+          pyinstaller vinzapai_backend.spec --clean --noconfirm
 
       - name: Verify PyInstaller output
         shell: pwsh
