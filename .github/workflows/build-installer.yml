@@ -2,68 +2,151 @@ name: Build VinzapAI Installer
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, master]
+  workflow_dispatch:
 
 jobs:
   build:
+    name: Build VinzapAI_Setup.exe
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18'
+      # 2. Set up Node.js
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: vinzapai-frontend/package-lock.json
 
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r vinzapai-backend/requirements.txt
-        pip install pyinstaller
+      # 3. Set up Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: vinzapai-backend/requirements.txt
 
-    - name: Install Node dependencies
-      run: |
-        cd vinzapai-frontend
-        npm install
+      # 4. Build React frontend
+      - name: Install frontend dependencies
+        working-directory: vinzapai-frontend
+        run: npm install --legacy-peer-deps
 
-    - name: Build React frontend
-      run: |
-        cd vinzapai-frontend
-        npm run build
+      - name: Build React app
+        working-directory: vinzapai-frontend
+        env:
+          CI: false
+        run: npm run build
 
-    - name: Copy frontend build to backend
-      run: |
-        xcopy vinzapai-frontend\build vinzapai-backend\frontend_build /E /I /Y
+      # 5. Copy React build into Django
+      - name: Copy React build into backend
+        shell: pwsh
+        run: |
+          $src  = "vinzapai-frontend\build"
+          $dest = "vinzapai-backend\frontend_build"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          Copy-Item -Recurse -Force $src $dest
+          Write-Host "Copied $src -> $dest"
 
-    - name: Collect static files
-      run: |
-        cd vinzapai-backend
-        python manage.py collectstatic --noinput --settings=backend.settings_standalone
+      # 6. Install Python dependencies
+      - name: Install Python packages
+        working-directory: vinzapai-backend
+        run: |
+          pip install -r requirements.txt
+          pip install waitress pyinstaller
 
-    - name: Build executable with PyInstaller
-      run: |
-        cd vinzapai-backend
-        pyinstaller -y vinzapai_backend.spec
+      # 7. Collect static files
+      - name: Collect Django static files
+        working-directory: vinzapai-backend
+        shell: pwsh
+        env:
+          CMS_BUILD_MODE: 'true'
+          DJANGO_SETTINGS_MODULE: backend.settings_standalone
+          VINZAPAI_DATA_DIR: '${{ github.workspace }}\vinzapai-backend'
+          VINZAPAI_BUNDLE_DIR: '${{ github.workspace }}\vinzapai-backend'
+          DJANGO_SECRET_KEY: 'build-time-secret-key-not-used-in-production'
+        run: python manage.py collectstatic --noinput --settings=backend.settings_standalone
 
-    - name: Install Inno Setup
-      run: |
-        choco install innosetup -y
+      # 8. Build .exe with PyInstaller
+      - name: Build with PyInstaller
+        working-directory: vinzapai-backend
+        run: pyinstaller vinzapai_backend.spec --clean --noconfirm
 
-    - name: Build installer
-      run: |
-        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /O"dist" installer.iss
+      - name: Verify PyInstaller output
+        shell: pwsh
+        run: |
+          $exePath = "vinzapai-backend\dist\VinzapAI_Server\VinzapAI_Server.exe"
+          if (-not (Test-Path $exePath)) {
+            Write-Error "VinzapAI_Server.exe not found — PyInstaller build failed."
+            exit 1
+          }
+          Write-Host "PyInstaller build: OK"
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: VinzapAI_Setup_Windows
-        path: dist/VinzapAI_Setup.exe
-        retention-days: 30
+      # 9. Install Inno Setup 6
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          choco install innosetup --yes --no-progress
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Error "Inno Setup not found."
+            exit 1
+          }
+          Write-Host "Inno Setup 6: OK"
+
+      # 10. Build installer
+      - name: Build installer with Inno Setup
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "Output" | Out-Null
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Inno Setup failed with code $LASTEXITCODE"
+            exit 1
+          }
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "Output\VinzapAI_Setup.exe")) {
+            Write-Error "VinzapAI_Setup.exe not produced."
+            exit 1
+          }
+          $sizeMB = (Get-Item "Output\VinzapAI_Setup.exe").Length / 1MB
+          Write-Host ("Installer size: {0:N1} MB" -f $sizeMB)
+          Write-Host "SUCCESS — VinzapAI_Setup.exe is ready!"
+
+      # 11. Upload artifact
+      - name: Upload VinzapAI_Setup.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VinzapAI_Setup_Windows
+          path: Output\VinzapAI_Setup.exe
+          retention-days: 30
+          if-no-files-found: error
+
+      # 12. Create GitHub Release on version tag
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output\VinzapAI_Setup.exe
+          name: VinzapAI ${{ github.ref_name }}
+          body: |
+            ## VinzapAI ${{ github.ref_name }}
+            AI-Powered Business Intelligence Dashboard
+
+            ### Installation
+            1. Download `VinzapAI_Setup.exe` below
+            2. Run it on any Windows 10/11 machine (64-bit)
+            3. Launch **VinzapAI** from the desktop shortcut
+            4. Login: admin / vinzap123
+
+            No Python or Node.js required — everything is bundled.

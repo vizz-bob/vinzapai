@@ -1,118 +1,211 @@
-import os
+"""
+VinzapAI Launcher
+=================
+Entry point for the PyInstaller-bundled .exe
+Starts the Django backend and opens a native app window via PyWebView.
+"""
+
 import sys
-import time
+import os
 import threading
+import time
+import shutil
 import logging
-import socket
-from pathlib import Path
-from django.core.wsgi import get_wsgi_application
-from waitress import serve
-import webview
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('VinzapAI')
 
-APP_TITLE = 'VinzapAI'
-SETTINGS_MODULE = 'backend.settings_standalone'
-WINDOW_TITLE = 'VinzapAI — AI Business Intelligence'
-ADMIN_URL = 'http://127.0.0.1:8000/admin/'
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
 
-DATA_DIR = Path(os.environ.get('VINZAPAI_DATA_DIR', Path(__file__).parent / 'vinzapai_data'))
-BUNDLE_DIR = Path(os.environ.get('VINZAPAI_BUNDLE_DIR', Path(__file__).parent))
+def get_bundle_dir():
+    if hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS
+    return os.path.abspath(os.path.dirname(__file__))
 
-DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-log_file = DATA_DIR / 'vinzapai.log'
-file_handler = logging.FileHandler(log_file)
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
-logger.addHandler(file_handler)
+def get_app_dir():
+    if hasattr(sys, 'frozen'):
+        return os.path.dirname(sys.executable)
+    return os.path.abspath(os.path.dirname(__file__))
 
-os.environ['DJANGO_SETTINGS_MODULE'] = SETTINGS_MODULE
-os.environ['VINZAPAI_DATA_DIR'] = str(DATA_DIR)
-os.environ['VINZAPAI_BUNDLE_DIR'] = str(BUNDLE_DIR)
 
-import django
-from django.conf import settings
-from django.core.management import call_command
-from django.contrib.auth.models import User
+# ---------------------------------------------------------------------------
+# Data directory setup
+# ---------------------------------------------------------------------------
 
-django.setup()
+def setup_data_directory(app_dir, bundle_dir):
+    data_dir = os.path.join(app_dir, 'vinzapai_data')
+    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(os.path.join(data_dir, 'media'), exist_ok=True)
+    return data_dir
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def setup_logging(data_dir):
+    os.makedirs(data_dir, exist_ok=True)
+    log_file = os.path.join(data_dir, 'vinzapai.log')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, encoding='utf-8'),
+            logging.StreamHandler(sys.stdout),
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Django environment setup
+# ---------------------------------------------------------------------------
+
+def setup_django_env(bundle_dir, data_dir):
+    if bundle_dir not in sys.path:
+        sys.path.insert(0, bundle_dir)
+
+    os.environ['DJANGO_SETTINGS_MODULE'] = 'backend.settings_standalone'
+    os.environ.setdefault('ALLOWED_HOSTS', 'localhost,127.0.0.1')
+    os.environ.setdefault('DEBUG', 'False')
+    os.environ.setdefault(
+        'DJANGO_SECRET_KEY',
+        'vinzapai-standalone-secret-key-change-in-production-xyz987'
+    )
+    os.environ['VINZAPAI_DATA_DIR']   = data_dir
+    os.environ['VINZAPAI_BUNDLE_DIR'] = bundle_dir
+
+
+# ---------------------------------------------------------------------------
+# Django startup tasks
+# ---------------------------------------------------------------------------
+
+def run_migrations():
+    from django.core.management import call_command
+    logging.info("Applying database migrations...")
+    try:
+        call_command('migrate', '--run-syncdb', verbosity=0)
+        logging.info("Migrations complete.")
+    except Exception as exc:
+        logging.warning(f"Migration warning (non-fatal): {exc}")
 
 
 def create_default_superuser():
-    logger.info('Checking for superuser...')
-    if User.objects.filter(username='admin').exists():
-        logger.info('Admin user already exists')
-        return
-
-    logger.info('Creating default superuser: admin/vinzap123')
-    User.objects.create_superuser('admin', 'admin@vinzapai.local', 'vinzap123')
-    logger.info('Superuser created successfully')
-
-
-def run_migrations():
-    logger.info('Running database migrations...')
+    """Create a default admin superuser on first run if none exists."""
     try:
-        call_command('migrate', verbosity=0)
-        logger.info('Migrations completed')
-    except Exception as e:
-        logger.error(f'Migration failed: {e}')
-        raise
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        if not User.objects.filter(is_superuser=True).exists():
+            User.objects.create_superuser(
+                username='admin',
+                email='admin@vinzapai.com',
+                password='vinzap123',
+            )
+            logging.info("=" * 50)
+            logging.info("  Default admin account created:")
+            logging.info("    Username : admin")
+            logging.info("    Password : vinzap123")
+            logging.info("  Please change your password after first login!")
+            logging.info("  Admin URL: http://127.0.0.1:8000/admin/")
+            logging.info("=" * 50)
+        else:
+            logging.info("Superuser already exists — skipping creation.")
+    except Exception as exc:
+        logging.warning(f"Could not create default superuser: {exc}")
 
 
-def check_port_available(port):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    result = sock.connect_ex(('127.0.0.1', port))
-    sock.close()
-    return result != 0
+# ---------------------------------------------------------------------------
+# Waitress server
+# ---------------------------------------------------------------------------
+
+def start_server():
+    from waitress import serve
+    from backend.wsgi import application
+    logging.info("Starting Waitress server on http://127.0.0.1:8000 ...")
+    serve(application, host='127.0.0.1', port=8000, threads=6)
 
 
-def wait_for_server(max_attempts=30):
-    logger.info('Waiting for server to be ready...')
-    for attempt in range(max_attempts):
-        if not check_port_available(8000):
-            logger.info('Server is ready!')
+def wait_for_server(url='http://127.0.0.1:8000', timeout=30):
+    import urllib.request
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(url, timeout=1)
             return True
-        time.sleep(0.5)
-    logger.error('Server failed to start within timeout')
+        except Exception:
+            time.sleep(0.3)
     return False
 
 
-def run_django_server():
-    logger.info(f'Starting {APP_TITLE} server on http://127.0.0.1:8000')
-    try:
-        application = get_wsgi_application()
-        serve(application, host='127.0.0.1', port=8000, _quiet=True)
-    except Exception as e:
-        logger.error(f'Server error: {e}')
-        raise
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    logger.info(f'Initializing {APP_TITLE}')
+    bundle_dir = get_bundle_dir()
+    app_dir    = get_app_dir()
+    data_dir   = setup_data_directory(app_dir, bundle_dir)
 
+    setup_logging(data_dir)
+    logging.info("=" * 50)
+    logging.info("  VinzapAI  —  Starting...")
+    logging.info("=" * 50)
+    logging.info(f"Bundle : {bundle_dir}")
+    logging.info(f"App dir: {app_dir}")
+    logging.info(f"Data   : {data_dir}")
+
+    # 1. Configure Django
+    setup_django_env(bundle_dir, data_dir)
+
+    # 2. Boot Django
+    import django
+    django.setup()
+
+    # 3. Run migrations
     run_migrations()
+
+    # 3b. Create default superuser on first run
     create_default_superuser()
 
-    server_thread = threading.Thread(target=run_django_server, daemon=True)
+    # 4. Start Waitress in background thread
+    server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
 
-    if not wait_for_server():
-        logger.error('Failed to start server')
+    # 5. Wait for server to be ready
+    logging.info("Waiting for server to be ready...")
+    ready = wait_for_server('http://127.0.0.1:8000', timeout=30)
+    if not ready:
+        logging.error("Server did not start in time — exiting.")
         sys.exit(1)
+    logging.info("Server ready.")
 
-    logger.info(f'Opening {APP_TITLE} window')
-    webview.create_window(
-        WINDOW_TITLE,
-        ADMIN_URL,
-        width=1440,
-        height=900,
-        background_color='#1f2937'
-    )
-    webview.start()
+    # 6. Open native app window with PyWebView
+    try:
+        import webview
+        window = webview.create_window(
+            title='VinzapAI — AI Business Intelligence',
+            url='http://127.0.0.1:8000/admin/',
+            width=1440,
+            height=900,
+            resizable=True,
+            min_size=(1024, 700),
+            text_select=True,
+            confirm_close=False,
+        )
+        logging.info("Opening app window...")
+        webview.start(gui='edgechromium', debug=False)
+
+    except Exception as e:
+        logging.warning(f"PyWebView failed ({e}), falling back to browser.")
+        import webbrowser
+        webbrowser.open('http://127.0.0.1:8000/admin/')
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+
+    logging.info("App window closed. Goodbye!")
 
 
 if __name__ == '__main__':
