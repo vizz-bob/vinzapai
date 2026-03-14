@@ -21,7 +21,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "dist\VinzapAI_Server\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "vinzapai-backend\dist\VinzapAI_Server\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\VinzapAI"; Filename: "{app}\VinzapAI_Server.exe"; IconFilename: "{app}\VinzapAI_Server.exe"
