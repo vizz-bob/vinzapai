@@ -60,7 +60,7 @@ dist/
 
 # PyInstaller
 *.manifest
-*.spec
+# *.spec  <-- PyInstaller spec files MUST be committed, do not ignore
 build/
 dist/
 *.exe
